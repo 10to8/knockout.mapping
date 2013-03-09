@@ -83,7 +83,7 @@
 	exports.isMapped = function (viewModel) {
 		var unwrapped = ko.utils.unwrapObservable(viewModel);
 		return unwrapped && unwrapped[mappingProperty];
-	}
+	};
 
 	exports.fromJS = function (jsObject /*, inputOptions, target*/ ) {
 		if (arguments.length == 0) throw new Error("When calling ko.fromJS, pass the object you want to convert.");
@@ -156,7 +156,7 @@
 	exports.updateFromJSON = function (viewModel) {
 		throw new Error("ko.mapping.updateFromJSON, use ko.mapping.fromJSON instead. Please note that the order of parameters is different!");
 	};
-
+	
 	exports.toJS = function (rootObject, options) {
 		if (!defaultOptions) exports.resetDefaultOptions();
 
@@ -164,16 +164,57 @@
 		if (exports.getType(defaultOptions.ignore) !== "array") throw new Error("ko.mapping.defaultOptions().ignore should be an array.");
 		if (exports.getType(defaultOptions.include) !== "array") throw new Error("ko.mapping.defaultOptions().include should be an array.");
 		if (exports.getType(defaultOptions.copy) !== "array") throw new Error("ko.mapping.defaultOptions().copy should be an array.");
+		
+		options = fillOptions(options || {}, rootObject[mappingProperty]);
+		var visitedObjects = new objectLookup();
 
-		// Merge in the options used in fromJS
-		options = fillOptions(options, rootObject[mappingProperty]);
-
-		// We just unwrap everything at every level in the object graph
-		return exports.visitModel(rootObject, function (x) {
-			return ko.utils.unwrapObservable(x)
-		}, options);
+		var unwrappedRootObject = ko.utils.unwrapObservable(rootObject);
+    
+		var _recursive_toJS = function(obj, reference_name, obj_options, field_level_mapping_options) {
+			var previous_version = visitedObjects.get(obj);
+			if(typeof(previous_version) != 'undefined') {
+			  return previous_version;
+			}
+			
+			var obj_is_array = exports.getType(obj) === "array";
+			var converted_obj = obj_is_array ? [] : {};
+			visitedObjects.save(obj, converted_obj);
+			
+			visitPropertiesOrArrayEntriesFollowingOptions(obj, obj_options, function(indexer, is_array) {
+				var child_obj = obj[indexer];
+				var unwrapped_child_obj = ko.utils.unwrapObservable(child_obj);
+				var property_name = getPropertyName(reference_name, obj, indexer);
+				if (!canHaveProperties(unwrapped_child_obj)) {
+				  return unwrapped_child_obj;
+				} else {
+					var new_options = fillOptions(obj_options, unwrapped_child_obj[mappingProperty]);
+	        
+					var new_field_level_mapping_options;
+					if(is_array) {
+					  new_field_level_mapping_options = field_level_mapping_options;
+					} else {
+					  var mapping_options = obj[mappingProperty];
+					  new_field_level_mapping_options = typeof mapping_options !== "undefined" ? mapping_options[indexer] : undefined;
+					};
+					
+					var new_value = null;
+					if(exports.getType(unwrapped_child_obj) !== "array" 
+					    && typeof(new_field_level_mapping_options) !== "undefined" 
+					    && typeof(new_field_level_mapping_options.restore) !== "undefined") {
+					  new_value = new_field_level_mapping_options.restore(unwrapped_child_obj);
+					} else {
+					  new_value = _recursive_toJS(unwrapped_child_obj, property_name, new_options, new_field_level_mapping_options);
+					};
+					
+					converted_obj[indexer] = new_value;
+				};
+	    });
+		  return converted_obj;
+		};
+	  
+	  return _recursive_toJS(unwrappedRootObject, null, options, undefined);
 	};
-
+	
 	exports.toJSON = function (rootObject, options) {
 		var plainJavaScriptObject = exports.toJS(rootObject, options);
 		return ko.utils.stringifyJson(plainJavaScriptObject);
@@ -202,7 +243,7 @@
 			if (x.constructor === Array) return "array";
 		}
 		return typeof x;
-	}
+	};
 
 	function fillOptions(rawOptions, otherOptions) {
 		var options = merge({}, rawOptions);
@@ -300,7 +341,7 @@
 			}
 
 			return realDependentObservable;
-		}
+		};
 		ko.dependentObservable.fn = realKoDependentObservable.fn;
 		ko.computed = ko.dependentObservable;
 		var result = callback();
@@ -363,7 +404,7 @@
 			}
 
 			return options[parentName].update(params);
-		}
+		};
 
 		var alreadyMapped = visitedObjects.get(rootObject);
 		if (alreadyMapped) {
@@ -682,11 +723,34 @@
 	function visitPropertiesOrArrayEntries(rootObject, visitorCallback) {
 		if (exports.getType(rootObject) === "array") {
 			for (var i = 0; i < rootObject.length; i++)
-			visitorCallback(i);
+			visitorCallback(i, true);
 		} else {
 			for (var propertyName in rootObject)
-			visitorCallback(propertyName);
+			visitorCallback(propertyName, false);
 		}
+	};
+	
+	function visitPropertiesOrArrayEntriesFollowingOptions(rootObject, options, visitorCallback) {
+	  visitPropertiesOrArrayEntries(rootObject, function(indexer, is_array) {
+      if (options.ignore && ko.utils.arrayIndexOf(options.ignore, indexer) != -1) return;
+    
+      // If we don't want to explicitly copy the unmapped property...
+      if (ko.utils.arrayIndexOf(options.copy, indexer) === -1) {
+        // ...find out if it's a property we want to explicitly include
+        if (ko.utils.arrayIndexOf(options.include, indexer) === -1) {
+          // The mapped properties object contains all the properties that were part of the original object.
+          // If a property does not exist, and it is not because it is part of an array (e.g. "myProp[3]"), then it should not be unmapped.
+            if (rootObject[mappingProperty]
+                && rootObject[mappingProperty].mappedProperties && !rootObject[mappingProperty].mappedProperties[indexer]
+                && rootObject[mappingProperty].copiedProperties && !rootObject[mappingProperty].copiedProperties[indexer]
+                && !(exports.getType(rootObject) === "array")) {
+            return;
+          }
+        }
+      }
+      
+      visitorCallback(indexer, is_array);
+	  });
 	};
 
 	function canHaveProperties(object) {
@@ -731,26 +795,9 @@
 		options.visitedObjects.save(rootObject, mappedRootObject);
 
 		var parentName = options.parentName;
-		visitPropertiesOrArrayEntries(unwrappedRootObject, function (indexer) {
-			if (options.ignore && ko.utils.arrayIndexOf(options.ignore, indexer) != -1) return;
-
+		visitPropertiesOrArrayEntriesFollowingOptions(unwrappedRootObject, options, function (indexer) {
 			var propertyValue = unwrappedRootObject[indexer];
-			options.parentName = getPropertyName(parentName, unwrappedRootObject, indexer);
-
-			// If we don't want to explicitly copy the unmapped property...
-			if (ko.utils.arrayIndexOf(options.copy, indexer) === -1) {
-				// ...find out if it's a property we want to explicitly include
-				if (ko.utils.arrayIndexOf(options.include, indexer) === -1) {
-					// The mapped properties object contains all the properties that were part of the original object.
-					// If a property does not exist, and it is not because it is part of an array (e.g. "myProp[3]"), then it should not be unmapped.
-				    if (unwrappedRootObject[mappingProperty]
-				        && unwrappedRootObject[mappingProperty].mappedProperties && !unwrappedRootObject[mappingProperty].mappedProperties[indexer]
-				        && unwrappedRootObject[mappingProperty].copiedProperties && !unwrappedRootObject[mappingProperty].copiedProperties[indexer]
-				        && !(exports.getType(unwrappedRootObject) === "array")) {
-						return;
-					}
-				}
-			}
+      options.parentName = getPropertyName(parentName, unwrappedRootObject, indexer);
 
 			var outputProperty;
 			switch (exports.getType(ko.utils.unwrapObservable(propertyValue))) {
